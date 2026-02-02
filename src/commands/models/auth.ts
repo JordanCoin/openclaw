@@ -1,32 +1,35 @@
 import { confirm as clackConfirm, select as clackSelect, text as clackText } from "@clack/prompts";
-import type { AuthProfileCredential } from "../../agents/auth-profiles/types.js";
-import type {
-  ProviderAuthMethod,
-  ProviderAuthResult,
-  ProviderPlugin,
-} from "../../plugins/types.js";
-import type { RuntimeEnv } from "../../runtime.js";
+
+import { upsertAuthProfile } from "../../agents/auth-profiles.js";
+import { normalizeProviderId } from "../../agents/model-selection.js";
 import {
   resolveAgentDir,
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../../agents/agent-scope.js";
-import { upsertAuthProfile } from "../../agents/auth-profiles.js";
-import { normalizeProviderId } from "../../agents/model-selection.js";
 import { resolveDefaultAgentWorkspaceDir } from "../../agents/workspace.js";
-import { formatCliCommand } from "../../cli/command-format.js";
 import { parseDurationMs } from "../../cli/parse-duration.js";
+import { formatCliCommand } from "../../cli/command-format.js";
 import { readConfigFileSnapshot, type OpenClawConfig } from "../../config/config.js";
 import { logConfigUpdated } from "../../config/logging.js";
-import { resolvePluginProviders } from "../../plugins/providers.js";
+import type { RuntimeEnv } from "../../runtime.js";
 import { stylePromptHint, stylePromptMessage } from "../../terminal/prompt-style.js";
-import { createClackPrompter } from "../../wizard/clack-prompter.js";
-import { validateAnthropicSetupToken } from "../auth-token.js";
+import { loginOpenAICodex } from "@mariozechner/pi-ai";
+import { applyAuthProfileConfig, writeOAuthCredentials } from "../onboard-auth.js";
 import { isRemoteEnvironment } from "../oauth-env.js";
-import { createVpsAwareOAuthHandlers } from "../oauth-flow.js";
-import { applyAuthProfileConfig } from "../onboard-auth.js";
 import { openUrl } from "../onboard-helpers.js";
+import { createVpsAwareOAuthHandlers } from "../oauth-flow.js";
 import { updateConfig } from "./shared.js";
+import { resolvePluginProviders } from "../../plugins/providers.js";
+import { createClackPrompter } from "../../wizard/clack-prompter.js";
+import type {
+  ProviderAuthMethod,
+  ProviderAuthResult,
+  ProviderPlugin,
+} from "../../plugins/types.js";
+import type { AuthProfileCredential } from "../../agents/auth-profiles/types.js";
+import { validateAnthropicSetupToken } from "../auth-token.js";
+import { OPENAI_CODEX_DEFAULT_MODEL } from "../openai-codex-model-default.js";
 
 const confirm = (params: Parameters<typeof clackConfirm>[0]) =>
   clackConfirm({
@@ -51,13 +54,9 @@ type TokenProvider = "anthropic";
 
 function resolveTokenProvider(raw?: string): TokenProvider | "custom" | null {
   const trimmed = raw?.trim();
-  if (!trimmed) {
-    return null;
-  }
+  if (!trimmed) return null;
   const normalized = normalizeProviderId(trimmed);
-  if (normalized === "anthropic") {
-    return "anthropic";
-  }
+  if (normalized === "anthropic") return "anthropic";
   return "custom";
 }
 
@@ -83,9 +82,7 @@ export async function modelsAuthSetupTokenCommand(
       message: "Have you run `claude setup-token` and copied the token?",
       initialValue: true,
     });
-    if (!proceed) {
-      return;
-    }
+    if (!proceed) return;
   }
 
   const tokenInput = await text({
@@ -239,14 +236,14 @@ type LoginOptions = {
   setDefault?: boolean;
 };
 
+const OPENAI_CODEX_PROVIDER_ALIASES = new Set(["openai-codex", "codex", "codex-cli"]);
+
 function resolveProviderMatch(
   providers: ProviderPlugin[],
   rawProvider?: string,
 ): ProviderPlugin | null {
   const raw = rawProvider?.trim();
-  if (!raw) {
-    return null;
-  }
+  if (!raw) return null;
   const normalized = normalizeProviderId(raw);
   return (
     providers.find((provider) => normalizeProviderId(provider.id) === normalized) ??
@@ -260,9 +257,7 @@ function resolveProviderMatch(
 
 function pickAuthMethod(provider: ProviderPlugin, rawMethod?: string): ProviderAuthMethod | null {
   const raw = rawMethod?.trim();
-  if (!raw) {
-    return null;
-  }
+  if (!raw) return null;
   const normalized = raw.toLowerCase();
   return (
     provider.auth.find((method) => method.id.toLowerCase() === normalized) ??
@@ -316,13 +311,77 @@ function applyDefaultModel(cfg: OpenClawConfig, model: string): OpenClawConfig {
 }
 
 function credentialMode(credential: AuthProfileCredential): "api_key" | "oauth" | "token" {
-  if (credential.type === "api_key") {
-    return "api_key";
-  }
-  if (credential.type === "token") {
-    return "token";
-  }
+  if (credential.type === "api_key") return "api_key";
+  if (credential.type === "token") return "token";
   return "oauth";
+}
+
+async function runOpenAICodexOAuthLogin(
+  opts: LoginOptions,
+  runtime: RuntimeEnv,
+  config: OpenClawConfig,
+  agentDir: string,
+) {
+  const prompter = createClackPrompter();
+  const isRemote = isRemoteEnvironment();
+  await prompter.note(
+    isRemote
+      ? [
+          "You are running in a remote/VPS environment.",
+          "A URL will be shown for you to open in your LOCAL browser.",
+          "After signing in, paste the redirect URL back here.",
+        ].join("\n")
+      : [
+          "Browser will open for OpenAI authentication.",
+          "If the callback doesn't auto-complete, paste the redirect URL.",
+          "OpenAI OAuth uses localhost:1455 for the callback.",
+        ].join("\n"),
+    "OpenAI Codex OAuth",
+  );
+
+  const spin = prompter.progress("Starting OAuth flow…");
+  try {
+    const { onAuth, onPrompt } = createVpsAwareOAuthHandlers({
+      isRemote,
+      prompter,
+      runtime,
+      spin,
+      openUrl,
+      localBrowserMessage: "Complete sign-in in browser…",
+    });
+
+    const creds = await loginOpenAICodex({
+      onAuth,
+      onPrompt,
+      onProgress: (msg) => spin.update(msg),
+    });
+
+    spin.stop("OpenAI OAuth complete");
+    if (!creds) return;
+
+    await writeOAuthCredentials("openai-codex", creds, agentDir);
+    await updateConfig((cfg) => {
+      let next = applyAuthProfileConfig(cfg, {
+        profileId: "openai-codex:default",
+        provider: "openai-codex",
+        mode: "oauth",
+      });
+      if (opts.setDefault) {
+        next = applyDefaultModel(next, OPENAI_CODEX_DEFAULT_MODEL);
+      }
+      return next;
+    });
+
+    logConfigUpdated(runtime);
+    runtime.log("Auth profile: openai-codex:default (openai-codex/oauth)");
+    if (opts.setDefault) {
+      runtime.log(`Default model set to ${OPENAI_CODEX_DEFAULT_MODEL}`);
+    }
+  } catch (err) {
+    spin.stop("OpenAI OAuth failed");
+    runtime.error(String(err));
+    await prompter.note("Trouble with OAuth? See https://docs.openclaw.ai/start/faq", "OAuth help");
+  }
 }
 
 export async function modelsAuthLoginCommand(opts: LoginOptions, runtime: RuntimeEnv) {
@@ -341,6 +400,12 @@ export async function modelsAuthLoginCommand(opts: LoginOptions, runtime: Runtim
   const agentDir = resolveAgentDir(config, defaultAgentId);
   const workspaceDir =
     resolveAgentWorkspaceDir(config, defaultAgentId) ?? resolveDefaultAgentWorkspaceDir();
+
+  const normalizedProvider = normalizeProviderId(opts.provider ?? "");
+  if (OPENAI_CODEX_PROVIDER_ALIASES.has(normalizedProvider)) {
+    await runOpenAICodexOAuthLogin(opts, runtime, config, agentDir);
+    return;
+  }
 
   const providers = resolvePluginProviders({ config, workspaceDir });
   if (providers.length === 0) {

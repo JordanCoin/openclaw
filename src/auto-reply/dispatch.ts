@@ -11,6 +11,7 @@ import {
   type ReplyDispatcherOptions,
   type ReplyDispatcherWithTypingOptions,
 } from "./reply/reply-dispatcher.js";
+import { createInternalHookEvent, triggerInternalHook } from "../hooks/internal-hooks.js";
 
 export type DispatchInboundResult = DispatchFromConfigResult;
 
@@ -21,6 +22,15 @@ export async function dispatchInboundMessage(params: {
   replyOptions?: Omit<GetReplyOptions, "onToolResult" | "onBlockReply">;
   replyResolver?: typeof import("./reply.js").getReplyFromConfig;
 }): Promise<DispatchInboundResult> {
+  // Trigger message:received hook before processing (allows transcription, etc.)
+  const hookEvent = createInternalHookEvent(
+    "message",
+    "received",
+    params.ctx.SessionKey ?? "unknown",
+    { ctx: params.ctx, cfg: params.cfg },
+  );
+  await triggerInternalHook(hookEvent);
+
   const finalized = finalizeInboundContext(params.ctx);
   return await dispatchReplyFromConfig({
     ctx: finalized,
