@@ -46,6 +46,40 @@ Save to `~/.openclaw/openclaw.json` and you can DM the bot from that number.
 }
 ```
 
+## Model fallback chain (Claude Opus → Codex → OpenRouter → Gemini → local Qwen)
+
+Keep Claude and OpenAI Codex as primary and first fallback; when those are out of tokens, use OpenRouter auto, then Gemini, then a local Qwen 7B as last resort. Set `OPENROUTER_API_KEY` and ensure Ollama is running with `ollama pull qwen2.5:7b`. This matches the built-in constants in code (`DEFAULT_MODEL_PRIMARY`, `DEFAULT_MODEL_FALLBACKS`, `DEFAULT_FALLBACK_CHAIN_MODELS` in `src/config/defaults.ts`).
+
+```json5
+{
+  agents: {
+    defaults: {
+      model: {
+        primary: "anthropic/claude-opus-4-5",
+        fallbacks: [
+          "openai-codex/gpt-5.2",
+          "openrouter/openrouter/auto",
+          "openrouter/google/gemini-2.5-flash",
+          "ollama/qwen2.5:7b",
+        ],
+      },
+      models: {
+        "anthropic/claude-opus-4-5": { alias: "Claude" },
+        "openai-codex/gpt-5.2": { alias: "Codex" },
+        "openrouter/openrouter/auto": { alias: "OpenRouter" },
+        "openrouter/google/gemini-2.5-flash": { alias: "Gemini" },
+        "ollama/qwen2.5:7b": { alias: "Qwen 7B" },
+      },
+    },
+  },
+}
+```
+
+- **Claude / Codex:** Keep your existing auth; when they hit limits, the agent tries the next in the list.
+- **OpenRouter auto:** One `OPENROUTER_API_KEY`; auto picks a model by prompt and cost.
+- **Gemini:** Via OpenRouter (same key); no separate Google key needed.
+- **Local Qwen 7B:** Run `ollama pull qwen2.5:7b` and set `OLLAMA_API_KEY` (e.g. `ollama-local`). See [Ollama](/providers/ollama).
+
 ## Expanded example (major options)
 
 > JSON5 lets you use comments and trailing commas. Regular JSON works too.

@@ -80,7 +80,10 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
     }
 
     try {
-      await profileCtx.ensureBrowserAvailable();
+      // For extension relay profiles, starting the relay server should succeed even if
+      // no tab is attached yet (the user/extension can attach asynchronously).
+      const allowNoTab = profileCtx.profile.driver === "extension";
+      await profileCtx.ensureBrowserAvailable({ allowNoTab });
       res.json({ ok: true, profile: profileCtx.profile.name });
     } catch (err) {
       jsonError(res, 500, String(err));
