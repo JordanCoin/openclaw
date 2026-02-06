@@ -12,7 +12,14 @@ let relayWs = null
 /** @type {Promise<void>|null} */
 let relayConnectPromise = null
 
+// Sticky attach: remember tabs the user attached once, and reattach automatically
+// after relay reconnects (user consent is the initial click).
+const STICKY_KEY = 'stickyTabIds'
+
 let debuggerListenersInstalled = false
+
+let autoReconnectTimer = null
+let autoReconnectBackoffMs = 1000
 
 let nextSession = 1
 
@@ -42,10 +49,104 @@ async function getRelayPort() {
   return n
 }
 
+async function loadStickyTabIds() {
+  const stored = await chrome.storage.local.get([STICKY_KEY])
+  const raw = stored[STICKY_KEY]
+  if (!Array.isArray(raw)) return []
+  return raw.map((x) => Number.parseInt(String(x), 10)).filter((n) => Number.isFinite(n) && n > 0)
+}
+
+async function saveStickyTabIds(ids) {
+  const uniq = Array.from(new Set(ids)).filter((n) => Number.isFinite(n) && n > 0)
+  await chrome.storage.local.set({ [STICKY_KEY]: uniq })
+}
+
+async function addStickyTabId(tabId) {
+  const ids = await loadStickyTabIds()
+  if (ids.includes(tabId)) return
+  ids.push(tabId)
+  await saveStickyTabIds(ids)
+}
+
+async function removeStickyTabId(tabId) {
+  const ids = await loadStickyTabIds()
+  const next = ids.filter((id) => id !== tabId)
+  await saveStickyTabIds(next)
+}
+
+function clearAutoReconnectTimer() {
+  if (autoReconnectTimer) {
+    clearTimeout(autoReconnectTimer)
+    autoReconnectTimer = null
+  }
+}
+
+function scheduleAutoReconnect() {
+  clearAutoReconnectTimer()
+  autoReconnectTimer = setTimeout(async () => {
+    try {
+      const sticky = await loadStickyTabIds()
+      if (!sticky.length) return
+      if (relayWs && relayWs.readyState === WebSocket.OPEN) return
+
+      await ensureRelayConnection()
+      autoReconnectBackoffMs = 1000
+    } catch (err) {
+      // Exponential backoff up to 30s.
+      autoReconnectBackoffMs = Math.min(30000, Math.floor(autoReconnectBackoffMs * 1.8))
+      scheduleAutoReconnect()
+    }
+  }, autoReconnectBackoffMs)
+}
+
+async function autoReattachStickyTabs() {
+  // Only run when relay is connected.
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+
+  const ids = await loadStickyTabIds()
+  if (!ids.length) return
+
+  for (const tabId of ids) {
+    // Already attached? skip
+    if (tabs.get(tabId)?.state === 'connected') continue
+
+    // Does the tab still exist?
+    const exists = await chrome.tabs.get(tabId).then(() => true).catch(() => false)
+    if (!exists) {
+      await removeStickyTabId(tabId)
+      continue
+    }
+
+    try {
+      // Re-check existence right before acting to avoid races (tab closed between awaits).
+      const stillExists = await chrome.tabs.get(tabId).then(() => true).catch(() => false)
+      if (!stillExists) {
+        await removeStickyTabId(tabId)
+        continue
+      }
+
+      tabs.set(tabId, { state: 'connecting' })
+      setBadge(tabId, 'connecting')
+      void chrome.action
+        .setTitle({
+          tabId,
+          title: 'OpenClaw Browser Relay: reconnecting…',
+        })
+        .catch(() => {})
+      await attachTab(tabId, { skipAttachedEvent: false })
+    } catch (err) {
+      // Keep it sticky; user can click again if needed.
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn('auto-reattach failed', tabId, message)
+      setBadge(tabId, 'error')
+    }
+  }
+}
+
 function setBadge(tabId, kind) {
   const cfg = BADGE[kind]
-  void chrome.action.setBadgeText({ tabId, text: cfg.text })
-  void chrome.action.setBadgeBackgroundColor({ tabId, color: cfg.color })
+  void chrome.action.setBadgeText({ tabId, text: cfg.text }).catch(() => {})
+  void chrome.action.setBadgeBackgroundColor({ tabId, color: cfg.color }).catch(() => {})
   void chrome.action.setBadgeTextColor({ tabId, color: '#FFFFFF' }).catch(() => {})
 }
 
@@ -88,11 +189,17 @@ async function ensureRelayConnection() {
     ws.onclose = () => onRelayClosed('closed')
     ws.onerror = () => onRelayClosed('error')
 
+    // If we got connected, cancel any reconnect loop.
+    clearAutoReconnectTimer()
+
     if (!debuggerListenersInstalled) {
       debuggerListenersInstalled = true
       chrome.debugger.onEvent.addListener(onDebuggerEvent)
       chrome.debugger.onDetach.addListener(onDebuggerDetach)
     }
+
+    // Auto reattach previously-attached tabs after relay reconnect.
+    void autoReattachStickyTabs()
   })()
 
   try {
@@ -114,12 +221,15 @@ function onRelayClosed(reason) {
     setBadge(tabId, 'connecting')
     void chrome.action.setTitle({
       tabId,
-      title: 'OpenClaw Browser Relay: disconnected (click to re-attach)',
+      title: 'OpenClaw Browser Relay: disconnected (will auto-reconnect)',
     })
   }
   tabs.clear()
   tabBySession.clear()
   childSessionToTab.clear()
+
+  // If user has sticky tabs, proactively try to reconnect to the relay.
+  void scheduleAutoReconnect()
 }
 
 function sendToRelay(payload) {
@@ -243,6 +353,8 @@ async function attachTab(tabId, opts = {}) {
   }
 
   setBadge(tabId, 'on')
+  // Remember user intent: once attached, keep sticky across relay reconnects.
+  void addStickyTabId(tabId)
   return { sessionId, targetId }
 }
 
@@ -280,6 +392,9 @@ async function detachTab(tabId, reason) {
     tabId,
     title: 'OpenClaw Browser Relay (click to attach/detach)',
   })
+
+  // If user explicitly detached, stop auto-reattaching this tab.
+  void removeStickyTabId(tabId)
 }
 
 async function connectOrToggleForActiveTab() {
@@ -407,6 +522,15 @@ function onDebuggerEvent(source, method, params) {
 
   if (method === 'Target.detachedFromTarget' && params?.sessionId) {
     childSessionToTab.delete(String(params.sessionId))
+  }
+
+  // Some navigations can result in a new targetId. Keep our tabId↔targetId mapping fresh
+  // so the relay can continue routing commands after same-tab navigations.
+  if (method === 'Target.targetInfoChanged') {
+    const nextTargetId = String(params?.targetInfo?.targetId || '').trim()
+    if (nextTargetId && tab.targetId !== nextTargetId) {
+      tabs.set(tabId, { ...tab, targetId: nextTargetId })
+    }
   }
 
   try {

@@ -22,12 +22,16 @@ export type BrowserServerState = {
   profiles: Map<string, ProfileRuntimeState>;
 };
 
+export type EnsureBrowserOpts = {
+  allowNoTab?: boolean;
+};
+
 export type BrowserRouteContext = {
   state: () => BrowserServerState;
   forProfile: (profileName?: string) => ProfileContext;
   listProfiles: () => Promise<ProfileStatus[]>;
   // Legacy methods delegate to default profile for backward compatibility
-  ensureBrowserAvailable: () => Promise<void>;
+  ensureBrowserAvailable: (opts?: EnsureBrowserOpts) => Promise<void>;
   ensureTabAvailable: (targetId?: string) => Promise<BrowserTab>;
   isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
   isReachable: (timeoutMs?: number) => Promise<boolean>;
@@ -46,7 +50,7 @@ export type BrowserRouteContext = {
 
 export type ProfileContext = {
   profile: ResolvedBrowserProfile;
-  ensureBrowserAvailable: () => Promise<void>;
+  ensureBrowserAvailable: (opts?: EnsureBrowserOpts) => Promise<void>;
   ensureTabAvailable: (targetId?: string) => Promise<BrowserTab>;
   isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
   isReachable: (timeoutMs?: number) => Promise<boolean>;

@@ -272,7 +272,7 @@ function createProfileContext(
     });
   };
 
-  const ensureBrowserAvailable = async (): Promise<void> => {
+  const ensureBrowserAvailable = async (fnOpts?: { allowNoTab?: boolean }): Promise<void> => {
     const current = state();
     const remoteCdp = !profile.cdpIsLoopback;
     const isExtension = profile.driver === "extension";
@@ -300,7 +300,12 @@ function createProfileContext(
       if (await isReachable(600)) {
         return;
       }
-      // Relay server is up, but no attached tab yet. Prompt user to attach.
+      // Relay server is up, but no attached tab yet.
+      // For start/status flows we allow this (extension can attach asynchronously).
+      if (fnOpts?.allowNoTab) {
+        return;
+      }
+      // Otherwise prompt user to attach.
       throw new Error(
         `Chrome extension relay is running, but no tab is connected. Click the OpenClaw Chrome extension icon on a tab to attach it (profile "${profile.name}").`,
       );
@@ -653,7 +658,7 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
     forProfile,
     listProfiles,
     // Legacy methods delegate to default profile
-    ensureBrowserAvailable: () => getDefaultContext().ensureBrowserAvailable(),
+    ensureBrowserAvailable: (opts) => getDefaultContext().ensureBrowserAvailable(opts),
     ensureTabAvailable: (targetId) => getDefaultContext().ensureTabAvailable(targetId),
     isHttpReachable: (timeoutMs) => getDefaultContext().isHttpReachable(timeoutMs),
     isReachable: (timeoutMs) => getDefaultContext().isReachable(timeoutMs),
