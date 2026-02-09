@@ -1,0 +1,48 @@
+{
+  "id": "memory-v2",
+  "kind": "memory",
+  "name": "Memory V2",
+  "description": "Structured memory with typed entries, importance scores, tags, and semantic search via local embeddings",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "indexPath": {
+        "type": "string",
+        "description": "Path to v2 memory index JSON"
+      },
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": ["local", "none"],
+            "default": "none",
+            "description": "'local' for semantic search via transformers.js"
+          },
+          "modelName": {
+            "type": "string",
+            "default": "Xenova/all-MiniLM-L6-v2",
+            "description": "Hugging Face model for embeddings"
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "indexPath": {
+      "label": "Index Path",
+      "placeholder": "~/.openclaw/workspace/memory/index/memory-index.json"
+    },
+    "embedding.provider": {
+      "label": "Embedding Provider",
+      "help": "'local' enables semantic search (model loads on startup, ~2.4s)"
+    },
+    "embedding.modelName": {
+      "label": "Model",
+      "placeholder": "Xenova/all-MiniLM-L6-v2",
+      "help": "all-MiniLM-L6-v2 (fast) or all-mpnet-base-v2 (better quality)"
+    }
+  }
+}
