@@ -106,5 +106,19 @@ export function createInboundDebouncer<T>(params: {
     scheduleFlush(key, buffer);
   };
 
-  return { enqueue, flushKey };
+  /**
+   * Extend the debounce timer for a given key without adding any items.
+   * Used when the user is typing to delay processing until they're done.
+   */
+  const extendDebounce = (key: string) => {
+    if (debounceMs <= 0) {
+      return;
+    }
+    const existing = buffers.get(key);
+    if (existing) {
+      scheduleFlush(key, existing);
+    }
+  };
+
+  return { enqueue, flushKey, extendDebounce };
 }
