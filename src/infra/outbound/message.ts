@@ -115,10 +115,10 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
     throw new Error(`Unknown channel: ${params.channel}`);
   }
   const plugin = getChannelPlugin(channel);
-  if (!plugin) {
-    throw new Error(`Unknown channel: ${channel}`);
-  }
-  const deliveryMode = plugin.outbound?.deliveryMode ?? "direct";
+  // When the channel plugin hasn't registered yet (e.g. isolated cron sessions
+  // racing plugin init), fall through to gateway delivery so the message still
+  // has a chance to be routed by the gateway process where the plugin IS loaded.
+  const deliveryMode = plugin ? (plugin.outbound?.deliveryMode ?? "direct") : "gateway";
   const normalizedPayloads = normalizeReplyPayloadsForDelivery([
     {
       text: params.content,

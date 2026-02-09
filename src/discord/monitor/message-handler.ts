@@ -19,6 +19,11 @@ type DiscordConfig = NonNullable<
   import("../../config/config.js").OpenClawConfig["channels"]
 >["discord"];
 
+export type DiscordMessageHandlerResult = {
+  handler: DiscordMessageHandler;
+  extendDebounce: (channelId: string, authorId: string) => void;
+};
+
 export function createDiscordMessageHandler(params: {
   cfg: LoadedConfig;
   discordConfig: DiscordConfig;
@@ -36,7 +41,7 @@ export function createDiscordMessageHandler(params: {
   groupDmChannels?: Array<string | number>;
   allowFrom?: Array<string | number>;
   guildEntries?: Record<string, DiscordGuildEntryResolved>;
-}): DiscordMessageHandler {
+}): DiscordMessageHandlerResult {
   const groupPolicy = params.discordConfig?.groupPolicy ?? "open";
   const ackReactionScope = params.cfg.messages?.ackReactionScope ?? "group-mentions";
   const debounceMs = resolveInboundDebounceMs({ cfg: params.cfg, channel: "discord" });
@@ -136,11 +141,18 @@ export function createDiscordMessageHandler(params: {
     },
   });
 
-  return async (data, client) => {
+  const handler: DiscordMessageHandler = async (data, client) => {
     try {
       await debouncer.enqueue({ data, client });
     } catch (err) {
       params.runtime.error?.(danger(`handler failed: ${String(err)}`));
     }
   };
+
+  const extendDebounce = (channelId: string, authorId: string) => {
+    const key = `discord:${params.accountId}:${channelId}:${authorId}`;
+    debouncer.extendDebounce(key);
+  };
+
+  return { handler, extendDebounce };
 }

@@ -5,6 +5,7 @@ import {
   MessageReactionAddListener,
   MessageReactionRemoveListener,
   PresenceUpdateListener,
+  TypingStartListener,
 } from "@buape/carbon";
 import { danger } from "../../globals.js";
 import { formatDurationSeconds } from "../../infra/format-time/format-duration.ts";
@@ -289,6 +290,27 @@ async function handleDiscordReactionEvent(params: {
 }
 
 type PresenceUpdateEvent = Parameters<PresenceUpdateListener["handle"]>[0];
+type TypingStartEvent = Parameters<TypingStartListener["handle"]>[0];
+
+export type DiscordTypingHandler = (data: TypingStartEvent, client: Client) => void;
+
+export class DiscordTypingListener extends TypingStartListener {
+  constructor(
+    private handler: DiscordTypingHandler,
+    private logger?: Logger,
+  ) {
+    super();
+  }
+
+  async handle(data: TypingStartEvent, client: Client) {
+    try {
+      this.handler(data, client);
+    } catch (err) {
+      const logger = this.logger ?? discordEventQueueLog;
+      logger.error(danger(`discord typing handler failed: ${String(err)}`));
+    }
+  }
+}
 
 export class DiscordPresenceListener extends PresenceUpdateListener {
   private logger?: Logger;

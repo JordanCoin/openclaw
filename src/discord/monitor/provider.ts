@@ -33,6 +33,7 @@ import {
   DiscordPresenceListener,
   DiscordReactionListener,
   DiscordReactionRemoveListener,
+  DiscordTypingListener,
   registerDiscordListener,
 } from "./listeners.js";
 import { createDiscordMessageHandler } from "./message-handler.js";
@@ -130,7 +131,9 @@ function resolveDiscordGatewayIntents(
     GatewayIntents.MessageContent |
     GatewayIntents.DirectMessages |
     GatewayIntents.GuildMessageReactions |
-    GatewayIntents.DirectMessageReactions;
+    GatewayIntents.DirectMessageReactions |
+    GatewayIntents.GuildMessageTyping |
+    GatewayIntents.DirectMessageTyping;
   if (intentsConfig?.presence) {
     intents |= GatewayIntents.GuildPresences;
   }
@@ -533,7 +536,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     runtime.error?.(danger(`discord: failed to fetch bot identity: ${String(err)}`));
   }
 
-  const messageHandler = createDiscordMessageHandler({
+  const { handler: messageHandler, extendDebounce } = createDiscordMessageHandler({
     cfg,
     discordConfig: discordCfg,
     accountId: account.accountId,
@@ -553,6 +556,16 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   });
 
   registerDiscordListener(client.listeners, new DiscordMessageListener(messageHandler, logger));
+  registerDiscordListener(
+    client.listeners,
+    new DiscordTypingListener((data) => {
+      const userId = data.user_id;
+      const channelId = data.channel_id;
+      if (userId && channelId && userId !== botUserId) {
+        extendDebounce(channelId, userId);
+      }
+    }, logger),
+  );
   registerDiscordListener(
     client.listeners,
     new DiscordReactionListener({

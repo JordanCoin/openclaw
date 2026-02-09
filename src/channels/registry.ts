@@ -158,7 +158,14 @@ export function normalizeAnyChannelId(raw?: string | null): ChannelId | null {
     }
     return (entry.plugin.meta.aliases ?? []).some((alias) => alias.trim().toLowerCase() === key);
   });
-  return hit?.plugin.id ?? null;
+  if (hit?.plugin.id) {
+    return hit.plugin.id;
+  }
+
+  // Fallback: resolve against built-in channel IDs even when the plugin
+  // hasn't registered yet (e.g. isolated cron sessions that race plugin init).
+  const builtIn = normalizeChatChannelId(key);
+  return builtIn ?? null;
 }
 
 export function formatChannelPrimerLine(meta: ChatChannelMeta): string {
