@@ -9,7 +9,7 @@
     "properties": {
       "indexPath": {
         "type": "string",
-        "description": "Path to v2 memory index JSON"
+        "description": "Path to v2 memory index JSONL"
       },
       "embedding": {
         "type": "object",
@@ -33,7 +33,7 @@
   "uiHints": {
     "indexPath": {
       "label": "Index Path",
-      "placeholder": "~/.openclaw/workspace/memory/index/memory-index.json"
+      "placeholder": "~/.openclaw/workspace/memory/index/memory-index.jsonl"
     },
     "embedding.provider": {
       "label": "Embedding Provider",

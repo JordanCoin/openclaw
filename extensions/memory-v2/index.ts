@@ -20,6 +20,7 @@ type MemoryType = "learning" | "decision" | "interaction" | "event" | "insight";
 type V2MemoryEntry = {
   id: string;
   timestamp: string;
+  date: string;
   type: MemoryType;
   importance: number;
   content: string;
@@ -27,6 +28,7 @@ type V2MemoryEntry = {
   line: number;
   tags: string[];
   context?: string;
+  filePath?: string;
   embedding?: number[];
 };
 
@@ -58,7 +60,7 @@ function parseConfig(value: unknown): MemoryV2Config {
     "workspace",
     "memory",
     "index",
-    "memory-index.json",
+    "memory-index.jsonl",
   );
 
   const defaults: MemoryV2Config = {
@@ -177,12 +179,76 @@ function cosineSimilarity(a: number[], b: number[]): number {
 // Index Operations
 // ============================================================================
 
+function normalizeDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date().toISOString().slice(0, 10);
+  }
+  return parsed.toISOString().slice(0, 10);
+}
+
+function ensureDate(entry: V2MemoryEntry): V2MemoryEntry {
+  if (!entry.date) {
+    return { ...entry, date: normalizeDate(entry.timestamp) };
+  }
+  return entry;
+}
+
 function loadIndex(indexPath: string): V2MemoryIndex {
+  if (!fs.existsSync(indexPath)) {
+    return { version: "2.1", lastUpdated: new Date().toISOString(), memories: [] };
+  }
+
   try {
     const content = fs.readFileSync(indexPath, "utf-8");
-    return JSON.parse(content) as V2MemoryIndex;
-  } catch {
-    return { version: "2.0", lastUpdated: new Date().toISOString(), memories: [] };
+    const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
+
+    if (lines.length === 0) {
+      return { version: "2.1", lastUpdated: new Date().toISOString(), memories: [] };
+    }
+
+    let version = "2.1";
+    let lastUpdated = new Date().toISOString();
+    let embeddingModel: string | undefined;
+    let foundMeta = false;
+    const memories: V2MemoryEntry[] = [];
+
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (parsed && parsed._meta === true) {
+          foundMeta = true;
+          if (typeof parsed.version === "string") version = parsed.version;
+          if (typeof parsed.lastUpdated === "string") lastUpdated = parsed.lastUpdated;
+          if (typeof parsed.embeddingModel === "string") embeddingModel = parsed.embeddingModel;
+          continue;
+        }
+
+        const entry = parsed as V2MemoryEntry;
+        memories.push(ensureDate(entry));
+      } catch (err) {
+        console.warn("memory-v2: skipped malformed JSONL line", err);
+      }
+    }
+
+    if (!foundMeta && memories.length === 0 && content.includes('"memories"')) {
+      try {
+        const legacy = JSON.parse(content) as V2MemoryIndex;
+        return {
+          version: legacy.version || "2.0",
+          lastUpdated: legacy.lastUpdated || new Date().toISOString(),
+          embeddingModel: legacy.embeddingModel,
+          memories: (legacy.memories || []).map((entry) => ensureDate(entry)),
+        };
+      } catch (err) {
+        console.warn("memory-v2: failed to parse legacy JSON index", err);
+      }
+    }
+
+    return { version, lastUpdated, memories, embeddingModel };
+  } catch (err) {
+    console.warn("memory-v2: failed to read index", err);
+    return { version: "2.1", lastUpdated: new Date().toISOString(), memories: [] };
   }
 }
 
@@ -191,7 +257,72 @@ function saveIndex(indexPath: string, index: V2MemoryIndex): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+
+  if (!index.version) {
+    index.version = "2.1";
+  }
+  index.lastUpdated = new Date().toISOString();
+
+  const metaLine = JSON.stringify({
+    _meta: true,
+    version: index.version,
+    lastUpdated: index.lastUpdated,
+    embeddingModel: index.embeddingModel,
+  });
+
+  const lines = [metaLine];
+  for (const memory of index.memories) {
+    lines.push(JSON.stringify(ensureDate(memory)));
+  }
+
+  fs.writeFileSync(indexPath, `${lines.join("\n")}\n`);
+}
+
+function appendEntry(indexPath: string, entry: V2MemoryEntry): void {
+  const dir = path.dirname(indexPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const normalized = ensureDate(entry);
+
+  if (!fs.existsSync(indexPath) || fs.statSync(indexPath).size === 0) {
+    const metaLine = JSON.stringify({
+      _meta: true,
+      version: "2.1",
+      lastUpdated: new Date().toISOString(),
+      embeddingModel: undefined,
+    });
+    fs.writeFileSync(indexPath, `${metaLine}\n${JSON.stringify(normalized)}\n`);
+    return;
+  }
+
+  fs.appendFileSync(indexPath, `\n${JSON.stringify(normalized)}`);
+}
+
+function migrateJsonToJsonl(jsonPath: string, jsonlPath: string): boolean {
+  if (!fs.existsSync(jsonPath) || fs.existsSync(jsonlPath)) {
+    return false;
+  }
+
+  try {
+    const raw = fs.readFileSync(jsonPath, "utf-8");
+    const legacy = JSON.parse(raw) as V2MemoryIndex;
+    const memories = (legacy.memories || []).map((entry) => ensureDate(entry as V2MemoryEntry));
+
+    const migrated: V2MemoryIndex = {
+      version: "2.1",
+      lastUpdated: legacy.lastUpdated || new Date().toISOString(),
+      embeddingModel: legacy.embeddingModel,
+      memories,
+    };
+
+    saveIndex(jsonlPath, migrated);
+    return true;
+  } catch (err) {
+    console.warn("memory-v2: migration failed", err);
+    return false;
+  }
 }
 
 // ============================================================================
@@ -276,6 +407,13 @@ function searchMemories(
     }
 
     score += (entry.importance / 10) * 0.1;
+    const timestamp = entry.date || entry.timestamp;
+    const parsed = new Date(timestamp);
+    if (!Number.isNaN(parsed.getTime())) {
+      const daysSince = (Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24);
+      const recencyBoost = Math.max(0, 0.1 * (1 - daysSince / 30));
+      score += recencyBoost;
+    }
 
     if (score >= minScore) {
       scored.push({ entry, score, keywordScore, semanticScore });
@@ -314,6 +452,25 @@ const memoryV2Plugin = {
 
   register(api: OpenClawPluginApi) {
     const config = parseConfig(api.pluginConfig);
+    let indexPath = config.indexPath;
+    let jsonPath: string | null = null;
+    let jsonlPath: string | null = null;
+
+    if (indexPath.endsWith(".jsonl")) {
+      jsonlPath = indexPath;
+      jsonPath = indexPath.replace(/\.jsonl$/, ".json");
+    } else if (indexPath.endsWith(".json")) {
+      jsonPath = indexPath;
+      jsonlPath = `${indexPath}l`;
+      indexPath = jsonlPath;
+    }
+
+    if (jsonPath && jsonlPath) {
+      const migrated = migrateJsonToJsonl(jsonPath, jsonlPath);
+      if (migrated) {
+        api.logger.info(`memory-v2: migrated index to JSONL at ${jsonlPath}`);
+      }
+    }
 
     // Initialize embedder if configured
     let embedder: NodeEmbedder | null = null;
@@ -358,13 +515,7 @@ const memoryV2Plugin = {
             queryEmbedding = await embedder.embed(query);
           }
 
-          const results = searchMemories(
-            config.indexPath,
-            query,
-            maxResults,
-            minScore,
-            queryEmbedding,
-          );
+          const results = searchMemories(indexPath, query, maxResults, minScore, queryEmbedding);
 
           const searchMode = queryEmbedding ? "hybrid" : "keyword";
           const formatted = results.map(({ entry, score, keywordScore, semanticScore }) => ({
@@ -499,7 +650,7 @@ const memoryV2Plugin = {
           const limit = typeof params.limit === "number" ? params.limit : 100;
           const force = params.force === true;
 
-          const index = loadIndex(config.indexPath);
+          const index = loadIndex(indexPath);
           let embedded = 0,
             skipped = 0,
             failed = 0;
@@ -523,7 +674,7 @@ const memoryV2Plugin = {
 
           if (embedded > 0) {
             index.embeddingModel = config.embedding.modelName;
-            saveIndex(config.indexPath, index);
+            saveIndex(indexPath, index);
           }
 
           return {
@@ -550,7 +701,7 @@ const memoryV2Plugin = {
         description: "Show memory index statistics.",
         parameters: Type.Object({}),
         async execute() {
-          const index = loadIndex(config.indexPath);
+          const index = loadIndex(indexPath);
 
           const byType: Record<string, number> = {};
           const byImportance: Record<string, number> = {};
