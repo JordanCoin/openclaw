@@ -194,6 +194,12 @@ Keep Claude and OpenAI Codex as primary and first fallback; when those are out o
     },
     resetTriggers: ["/new", "/reset"],
     store: "~/.openclaw/agents/default/sessions/sessions.json",
+    maintenance: {
+      mode: "warn",
+      pruneAfter: "30d",
+      maxEntries: 500,
+      rotateBytes: "10mb",
+    },
     typingIntervalSeconds: 5,
     sendPolicy: {
       default: "allow",
@@ -378,6 +384,7 @@ Keep Claude and OpenAI Codex as primary and first fallback; when those are out o
     enabled: true,
     store: "~/.openclaw/cron/cron.json",
     maxConcurrentRuns: 2,
+    sessionRetention: "24h",
   },
 
   // Webhooks
