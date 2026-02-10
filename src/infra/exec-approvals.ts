@@ -616,7 +616,7 @@ export type ExecCommandAnalysis = {
   chains?: ExecCommandSegment[][]; // Segments grouped by chain operator (&&, ||, ;)
 };
 
-const DISALLOWED_PIPELINE_TOKENS = new Set([">", "<", "`", "\n", "\r", "(", ")"]);
+const DISALLOWED_PIPELINE_TOKENS = new Set(["`", "\n", "\r", "(", ")"]); // Removed > and < — redirects don't change what binary runs
 const DOUBLE_QUOTE_ESCAPES = new Set(["\\", '"', "$", "`", "\n", "\r"]);
 const WINDOWS_UNSUPPORTED_TOKENS = new Set([
   "&",

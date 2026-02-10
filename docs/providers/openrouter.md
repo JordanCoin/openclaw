@@ -19,19 +19,34 @@ openclaw onboard --auth-choice apiKey --token-provider openrouter --token "$OPEN
 
 ## Config snippet
 
+Put your API key in the environment (recommended) or in `env` in config:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
 ```json5
 {
-  env: { OPENROUTER_API_KEY: "sk-or-..." },
   agents: {
     defaults: {
-      model: { primary: "openrouter/anthropic/claude-sonnet-4-5" },
+      model: { primary: "openrouter/google/gemini-2.5-flash" },
+      models: {
+        "openrouter/google/gemini-2.5-flash": {},
+        "openrouter/openrouter/free": {},
+      },
     },
   },
 }
 ```
 
+## Free tier and Gemini
+
+- **Free models:** Use the Free Models Router with one API key: set `primary` to `openrouter/openrouter/free`. OpenRouter picks a free model per request. See [OpenRouter free models](https://openrouter.ai/docs/guides/guides/free-models-router-playground).
+- **Gemini via OpenRouter:** Use model refs like `openrouter/google/gemini-2.5-flash`, `openrouter/google/gemini-2.5-pro`, or `openrouter/google/gemini-2.0-flash-001`. No separate Google API key needed; only `OPENROUTER_API_KEY` is used.
+- **Auto (cost-aware):** `openrouter/openrouter/auto` chooses a model by prompt and cost.
+
 ## Notes
 
-- Model refs are `openrouter/<provider>/<model>`.
-- For more model/provider options, see [/concepts/model-providers](/concepts/model-providers).
-- OpenRouter uses a Bearer token with your API key under the hood.
+- Model refs are `openrouter/<provider>/<model>` (e.g. `openrouter/google/gemini-2.5-flash`).
+- For more providers and options, see [Model providers](/concepts/model-providers).
+- You can store the key securely: `openclaw auth set openrouter:default --key "sk-or-..."` after adding an `auth.profiles["openrouter:default"]` entry with `provider: "openrouter"` and `mode: "api_key"`.
