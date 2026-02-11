@@ -17,6 +17,19 @@ import * as path from "node:path";
 
 type MemoryType = "learning" | "decision" | "interaction" | "event" | "insight";
 
+type MemoryRelationType =
+  | "caused"
+  | "caused_by"
+  | "related"
+  | "supersedes"
+  | "contradicts"
+  | "elaborates";
+
+type MemoryRelation = {
+  id: string;
+  type: MemoryRelationType;
+};
+
 type V2MemoryEntry = {
   id: string;
   timestamp: string;
@@ -29,7 +42,10 @@ type V2MemoryEntry = {
   tags: string[];
   context?: string;
   filePath?: string;
-  embedding?: number[];
+  embedding?: number[] | string; // number[] = legacy v2, string = base64 v3
+  relations?: MemoryRelation[];
+  accessCount?: number;
+  lastAccessed?: string;
 };
 
 type V2MemoryIndex = {
@@ -176,6 +192,148 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 // ============================================================================
+// Binary Embedding Utilities (V3)
+// ============================================================================
+
+function encodeEmbedding(floats: number[]): string {
+  const buf = Buffer.from(new Float32Array(floats).buffer);
+  return buf.toString("base64");
+}
+
+function decodeEmbedding(b64: string): Float32Array {
+  const buf = Buffer.from(b64, "base64");
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+}
+
+function getEmbeddingFloat32(entry: V2MemoryEntry): Float32Array | null {
+  if (!entry.embedding) return null;
+  if (typeof entry.embedding === "string") return decodeEmbedding(entry.embedding);
+  return new Float32Array(entry.embedding);
+}
+
+function cosineSimilarityF32(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0,
+    normA = 0,
+    normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+// ============================================================================
+// Decay & Effective Importance
+// ============================================================================
+
+function effectiveImportance(entry: V2MemoryEntry): number {
+  const daysSinceCreation =
+    (Date.now() - new Date(entry.timestamp).getTime()) / (1000 * 60 * 60 * 24);
+  const decayFactor = Math.max(0.3, 1 - daysSinceCreation / 365);
+  const accessBoost = Math.min(2.0, 1 + (entry.accessCount || 0) * 0.1);
+  return entry.importance * decayFactor * accessBoost;
+}
+
+// ============================================================================
+// Graph Operations
+// ============================================================================
+
+function addRelation(
+  entry: V2MemoryEntry,
+  targetId: string,
+  relType: MemoryRelationType,
+): V2MemoryEntry {
+  const relations = entry.relations || [];
+  if (relations.some((r) => r.id === targetId && r.type === relType)) return entry;
+  return { ...entry, relations: [...relations, { id: targetId, type: relType }] };
+}
+
+const INVERSE_RELATION: Record<MemoryRelationType, MemoryRelationType> = {
+  caused: "caused_by",
+  caused_by: "caused",
+  related: "related",
+  supersedes: "supersedes",
+  contradicts: "contradicts",
+  elaborates: "elaborates",
+};
+
+function searchWithGraph(
+  allMemories: V2MemoryEntry[],
+  results: Array<{ entry: V2MemoryEntry; score: number }>,
+  depth: number = 1,
+): Array<{ entry: V2MemoryEntry; score: number; related: V2MemoryEntry[] }> {
+  const memoryById = new Map<string, V2MemoryEntry>();
+  for (const m of allMemories) memoryById.set(m.id, m);
+
+  const resultIds = new Set(results.map((r) => r.entry.id));
+
+  return results.map(({ entry, score }) => {
+    const related: V2MemoryEntry[] = [];
+    const visited = new Set<string>([entry.id, ...resultIds]);
+
+    let frontier = entry.relations || [];
+    for (let d = 0; d < depth && frontier.length > 0; d++) {
+      const nextFrontier: MemoryRelation[] = [];
+      for (const rel of frontier) {
+        if (visited.has(rel.id)) continue;
+        visited.add(rel.id);
+        const target = memoryById.get(rel.id);
+        if (target) {
+          related.push(target);
+          if (target.relations) nextFrontier.push(...target.relations);
+        }
+      }
+      frontier = nextFrontier;
+    }
+
+    // Increment access tracking
+    entry.accessCount = (entry.accessCount || 0) + 1;
+    entry.lastAccessed = new Date().toISOString();
+
+    return { entry, score, related };
+  });
+}
+
+function autoLinkNewEntry(
+  newEntry: V2MemoryEntry,
+  allMemories: V2MemoryEntry[],
+  threshold: number = 0.65,
+): V2MemoryEntry[] {
+  const newEmb = getEmbeddingFloat32(newEntry);
+  if (!newEmb) return allMemories;
+
+  const scored: Array<{ idx: number; sim: number }> = [];
+  for (let i = 0; i < allMemories.length; i++) {
+    const m = allMemories[i];
+    if (m.id === newEntry.id) continue;
+    const emb = getEmbeddingFloat32(m);
+    if (!emb) continue;
+    const sim = cosineSimilarityF32(newEmb, emb);
+    if (sim >= threshold) scored.push({ idx: i, sim });
+  }
+
+  scored.sort((a, b) => b.sim - a.sim);
+  const topN = scored.slice(0, 3);
+
+  const updated = [...allMemories];
+  for (const { idx } of topN) {
+    newEntry = addRelation(newEntry, updated[idx].id, "related");
+    updated[idx] = addRelation(updated[idx], newEntry.id, "related");
+  }
+
+  // Persist relation updates on the source entry too.
+  const sourceIdx = updated.findIndex((m) => m.id === newEntry.id);
+  if (sourceIdx >= 0) {
+    updated[sourceIdx] = newEntry;
+  }
+
+  return updated;
+}
+
+// ============================================================================
 // Index Operations
 // ============================================================================
 
@@ -187,11 +345,109 @@ function normalizeDate(value: string): string {
   return parsed.toISOString().slice(0, 10);
 }
 
-function ensureDate(entry: V2MemoryEntry): V2MemoryEntry {
-  if (!entry.date) {
-    return { ...entry, date: normalizeDate(entry.timestamp) };
-  }
-  return entry;
+const VALID_MEMORY_TYPES: MemoryType[] = [
+  "learning",
+  "decision",
+  "interaction",
+  "event",
+  "insight",
+];
+
+const VALID_RELATION_TYPES: MemoryRelationType[] = [
+  "caused",
+  "caused_by",
+  "related",
+  "supersedes",
+  "contradicts",
+  "elaborates",
+];
+
+function normalizeEntry(raw: unknown, fallbackLine: number = 1): V2MemoryEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const entry = raw as Record<string, unknown>;
+  const nowIso = new Date().toISOString();
+
+  const timestamp =
+    typeof entry.timestamp === "string" && !Number.isNaN(new Date(entry.timestamp).getTime())
+      ? entry.timestamp
+      : nowIso;
+
+  const date =
+    typeof entry.date === "string" && entry.date.trim().length > 0
+      ? entry.date
+      : normalizeDate(timestamp);
+
+  const type =
+    typeof entry.type === "string" && VALID_MEMORY_TYPES.includes(entry.type as MemoryType)
+      ? (entry.type as MemoryType)
+      : "event";
+
+  const importanceRaw = typeof entry.importance === "number" ? entry.importance : 5;
+  const importance = Math.max(1, Math.min(10, Math.round(importanceRaw)));
+
+  const content = typeof entry.content === "string" ? entry.content : "";
+
+  const file =
+    typeof entry.file === "string"
+      ? entry.file
+      : typeof entry.filePath === "string"
+        ? entry.filePath
+        : "";
+
+  const lineRaw = typeof entry.line === "number" ? entry.line : fallbackLine;
+  const line = Number.isFinite(lineRaw) && lineRaw > 0 ? Math.floor(lineRaw) : 1;
+
+  const tags = Array.isArray(entry.tags)
+    ? entry.tags.filter((t): t is string => typeof t === "string")
+    : [];
+
+  const relations: MemoryRelation[] | undefined = Array.isArray(entry.relations)
+    ? entry.relations
+        .filter((rel): rel is { id: unknown; type: unknown } => !!rel && typeof rel === "object")
+        .map((rel) => ({ id: String(rel.id ?? ""), type: String(rel.type ?? "") }))
+        .filter(
+          (rel): rel is MemoryRelation =>
+            rel.id.length > 0 && VALID_RELATION_TYPES.includes(rel.type as MemoryRelationType),
+        )
+    : undefined;
+
+  const embedding =
+    typeof entry.embedding === "string"
+      ? entry.embedding
+      : Array.isArray(entry.embedding)
+        ? entry.embedding.filter((v): v is number => typeof v === "number")
+        : undefined;
+
+  return {
+    id:
+      typeof entry.id === "string" && entry.id.trim().length > 0
+        ? entry.id
+        : `mem_${Date.now()}_${line}`,
+    timestamp,
+    date,
+    type,
+    importance,
+    content,
+    file,
+    line,
+    tags,
+    context: typeof entry.context === "string" ? entry.context : undefined,
+    filePath: typeof entry.filePath === "string" ? entry.filePath : undefined,
+    embedding,
+    relations,
+    accessCount:
+      typeof entry.accessCount === "number" && entry.accessCount >= 0
+        ? Math.floor(entry.accessCount)
+        : undefined,
+    lastAccessed: typeof entry.lastAccessed === "string" ? entry.lastAccessed : undefined,
+  };
+}
+
+function resolveMemoryPath(entry: V2MemoryEntry): string {
+  const file = typeof entry.file === "string" ? entry.file : "";
+  if (!file) return "";
+  return file.startsWith("daily/") ? `memory/${file}` : file;
 }
 
 function loadIndex(indexPath: string): V2MemoryIndex {
@@ -213,7 +469,8 @@ function loadIndex(indexPath: string): V2MemoryIndex {
     let foundMeta = false;
     const memories: V2MemoryEntry[] = [];
 
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       try {
         const parsed = JSON.parse(line) as Record<string, unknown>;
         if (parsed && parsed._meta === true) {
@@ -224,8 +481,12 @@ function loadIndex(indexPath: string): V2MemoryIndex {
           continue;
         }
 
-        const entry = parsed as V2MemoryEntry;
-        memories.push(ensureDate(entry));
+        const normalized = normalizeEntry(parsed, i + 1);
+        if (normalized) {
+          memories.push(normalized);
+        } else {
+          console.warn("memory-v2: skipped invalid memory entry", { line: i + 1 });
+        }
       } catch (err) {
         console.warn("memory-v2: skipped malformed JSONL line", err);
       }
@@ -234,11 +495,14 @@ function loadIndex(indexPath: string): V2MemoryIndex {
     if (!foundMeta && memories.length === 0 && content.includes('"memories"')) {
       try {
         const legacy = JSON.parse(content) as V2MemoryIndex;
+        const normalized = (legacy.memories || [])
+          .map((entry, idx) => normalizeEntry(entry, idx + 1))
+          .filter((entry): entry is V2MemoryEntry => !!entry);
         return {
           version: legacy.version || "2.0",
           lastUpdated: legacy.lastUpdated || new Date().toISOString(),
           embeddingModel: legacy.embeddingModel,
-          memories: (legacy.memories || []).map((entry) => ensureDate(entry)),
+          memories: normalized,
         };
       } catch (err) {
         console.warn("memory-v2: failed to parse legacy JSON index", err);
@@ -265,14 +529,22 @@ function saveIndex(indexPath: string, index: V2MemoryIndex): void {
 
   const metaLine = JSON.stringify({
     _meta: true,
-    version: index.version,
+    version: "3.0",
     lastUpdated: index.lastUpdated,
     embeddingModel: index.embeddingModel,
+    embeddingFormat: "base64-f32",
+    dimensions: 384,
   });
 
   const lines = [metaLine];
-  for (const memory of index.memories) {
-    lines.push(JSON.stringify(ensureDate(memory)));
+  for (let i = 0; i < index.memories.length; i++) {
+    const normalized = normalizeEntry(index.memories[i], i + 1);
+    if (!normalized) continue;
+    const serialized =
+      normalized.embedding && Array.isArray(normalized.embedding)
+        ? { ...normalized, embedding: encodeEmbedding(normalized.embedding) }
+        : normalized;
+    lines.push(JSON.stringify(serialized));
   }
 
   fs.writeFileSync(indexPath, `${lines.join("\n")}\n`);
@@ -284,20 +556,29 @@ function appendEntry(indexPath: string, entry: V2MemoryEntry): void {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const normalized = ensureDate(entry);
+  const normalized = normalizeEntry(entry, 1);
+  if (!normalized) {
+    throw new Error("memory-v2: cannot append invalid memory entry");
+  }
+
+  const serialized =
+    normalized.embedding && Array.isArray(normalized.embedding)
+      ? { ...normalized, embedding: encodeEmbedding(normalized.embedding) }
+      : normalized;
 
   if (!fs.existsSync(indexPath) || fs.statSync(indexPath).size === 0) {
     const metaLine = JSON.stringify({
       _meta: true,
-      version: "2.1",
+      version: "3.0",
       lastUpdated: new Date().toISOString(),
-      embeddingModel: undefined,
+      embeddingFormat: "base64-f32",
+      dimensions: 384,
     });
-    fs.writeFileSync(indexPath, `${metaLine}\n${JSON.stringify(normalized)}\n`);
+    fs.writeFileSync(indexPath, `${metaLine}\n${JSON.stringify(serialized)}\n`);
     return;
   }
 
-  fs.appendFileSync(indexPath, `\n${JSON.stringify(normalized)}`);
+  fs.appendFileSync(indexPath, `\n${JSON.stringify(serialized)}`);
 }
 
 function migrateJsonToJsonl(jsonPath: string, jsonlPath: string): boolean {
@@ -308,7 +589,9 @@ function migrateJsonToJsonl(jsonPath: string, jsonlPath: string): boolean {
   try {
     const raw = fs.readFileSync(jsonPath, "utf-8");
     const legacy = JSON.parse(raw) as V2MemoryIndex;
-    const memories = (legacy.memories || []).map((entry) => ensureDate(entry as V2MemoryEntry));
+    const memories = (legacy.memories || [])
+      .map((entry, idx) => normalizeEntry(entry as V2MemoryEntry, idx + 1))
+      .filter((entry): entry is V2MemoryEntry => !!entry);
 
     const migrated: V2MemoryIndex = {
       version: "2.1",
@@ -330,9 +613,9 @@ function migrateJsonToJsonl(jsonPath: string, jsonlPath: string): boolean {
 // ============================================================================
 
 function scoreKeywordMatch(entry: V2MemoryEntry, queryTerms: string[]): number {
-  const content = entry.content.toLowerCase();
-  const tags = entry.tags.map((t) => t.toLowerCase());
-  const type = entry.type.toLowerCase();
+  const content = (entry.content || "").toLowerCase();
+  const tags = (Array.isArray(entry.tags) ? entry.tags : []).map((t) => t.toLowerCase());
+  const type = (entry.type || "event").toLowerCase();
 
   let score = 0;
   let matchedTerms = 0;
@@ -372,8 +655,9 @@ function searchMemories(
   maxResults: number,
   minScore: number,
   queryEmbedding?: number[] | null,
+  index?: V2MemoryIndex,
 ): Array<{ entry: V2MemoryEntry; score: number; keywordScore: number; semanticScore: number }> {
-  const index = loadIndex(indexPath);
+  const loadedIndex = index || loadIndex(indexPath);
   const queryTerms = query
     .toLowerCase()
     .split(/\s+/)
@@ -390,30 +674,30 @@ function searchMemories(
     semanticScore: number;
   }> = [];
 
-  for (const entry of index.memories) {
+  // Convert query embedding to Float32Array once for efficient comparison
+  const queryEmbF32 = queryEmbedding ? new Float32Array(queryEmbedding) : null;
+
+  for (const entry of loadedIndex.memories) {
     const keywordScore = queryTerms.length > 0 ? scoreKeywordMatch(entry, queryTerms) : 0;
 
     let semanticScore = 0;
-    if (queryEmbedding && entry.embedding) {
-      semanticScore = cosineSimilarity(queryEmbedding, entry.embedding);
+    if (queryEmbF32 && entry.embedding) {
+      const entryEmb = getEmbeddingFloat32(entry);
+      if (entryEmb) {
+        semanticScore = cosineSimilarityF32(queryEmbF32, entryEmb);
+      }
     }
 
     let score: number;
-    if (queryEmbedding && entry.embedding) {
+    if (queryEmbF32 && entry.embedding) {
       // Hybrid: 60% semantic, 40% keyword
       score = semanticScore * 0.6 + keywordScore * 0.4;
     } else {
       score = keywordScore;
     }
 
-    score += (entry.importance / 10) * 0.1;
-    const timestamp = entry.date || entry.timestamp;
-    const parsed = new Date(timestamp);
-    if (!Number.isNaN(parsed.getTime())) {
-      const daysSince = (Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24);
-      const recencyBoost = Math.max(0, 0.1 * (1 - daysSince / 30));
-      score += recencyBoost;
-    }
+    // Use decay-aware importance instead of raw importance
+    score += (effectiveImportance(entry) / 10) * 0.1;
 
     if (score >= minScore) {
       scored.push({ entry, score, keywordScore, semanticScore });
@@ -515,21 +799,40 @@ const memoryV2Plugin = {
             queryEmbedding = await embedder.embed(query);
           }
 
-          const results = searchMemories(indexPath, query, maxResults, minScore, queryEmbedding);
+          // Load index once so access tracking mutations persist on save.
+          const index = loadIndex(indexPath);
+          const results = searchMemories(
+            indexPath,
+            query,
+            maxResults,
+            minScore,
+            queryEmbedding,
+            index,
+          );
+
+          // Graph-aware: enrich results with related memories
+          const graphResults = searchWithGraph(index.memories, results, 1);
+          // Persist access tracking
+          saveIndex(indexPath, index);
 
           const searchMode = queryEmbedding ? "hybrid" : "keyword";
-          const formatted = results.map(({ entry, score, keywordScore, semanticScore }) => ({
+          const formatted = graphResults.map(({ entry, score, related }) => ({
             id: entry.id,
-            path: entry.file.startsWith("daily/") ? `memory/${entry.file}` : entry.file,
-            line: entry.line,
+            path: resolveMemoryPath(entry),
+            line: entry.line || 1,
             score: Math.round(score * 100) / 100,
-            keywordScore: Math.round(keywordScore * 100) / 100,
-            semanticScore: Math.round(semanticScore * 100) / 100,
             type: entry.type,
             importance: entry.importance,
+            effectiveImportance: Math.round(effectiveImportance(entry) * 100) / 100,
             tags: entry.tags,
             snippet: entry.content,
             hasEmbedding: !!entry.embedding,
+            relations: entry.relations || [],
+            relatedMemories: related.map((r) => ({
+              id: r.id,
+              type: r.type,
+              snippet: r.content.slice(0, 80),
+            })),
           }));
 
           return {
@@ -538,11 +841,14 @@ const memoryV2Plugin = {
                 type: "text",
                 text:
                   results.length > 0
-                    ? `Found ${results.length} memories (${searchMode}):\n\n${results
-                        .map(
-                          (r, i) =>
-                            `${i + 1}. [${r.entry.type.toUpperCase()}] (importance: ${r.entry.importance}, score: ${(r.score * 100).toFixed(0)}%) ${r.entry.content.slice(0, 100)}...`,
-                        )
+                    ? `Found ${results.length} memories (${searchMode}):\n\n${graphResults
+                        .map((r, i) => {
+                          let line = `${i + 1}. [${r.entry.type.toUpperCase()}] (importance: ${r.entry.importance}, score: ${(r.score * 100).toFixed(0)}%) ${r.entry.content.slice(0, 100)}...`;
+                          if (r.related.length > 0) {
+                            line += `\n   └─ ${r.related.length} related: ${r.related.map((rel) => rel.content.slice(0, 50)).join("; ")}`;
+                          }
+                          return line;
+                        })
                         .join("\n")}`
                     : `No matching memories found (${searchMode}).`,
               },
@@ -672,7 +978,22 @@ const memoryV2Plugin = {
             }
           }
 
+          // Auto-link newly embedded entries to similar existing ones
+          let linked = 0;
           if (embedded > 0) {
+            for (const memory of index.memories) {
+              if (!memory.relations || memory.relations.length === 0) {
+                const before = memory.relations?.length || 0;
+                const updated = autoLinkNewEntry(memory, index.memories);
+                // Copy updated relations back
+                for (let i = 0; i < updated.length; i++) {
+                  index.memories[i] = updated[i];
+                }
+                const after = memory.relations?.length || 0;
+                if (after > before) linked++;
+              }
+            }
+
             index.embeddingModel = config.embedding.modelName;
             saveIndex(indexPath, index);
           }
@@ -681,10 +1002,10 @@ const memoryV2Plugin = {
             content: [
               {
                 type: "text",
-                text: `Embedding complete: ${embedded} embedded, ${skipped} already had embeddings, ${failed} failed.\nSemantic search is now ${embedded > 0 || skipped > 0 ? "enabled" : "disabled"}.`,
+                text: `Embedding complete: ${embedded} embedded, ${skipped} already had embeddings, ${failed} failed.${linked > 0 ? ` Auto-linked ${linked} memories.` : ""}\nSemantic search is now ${embedded > 0 || skipped > 0 ? "enabled" : "disabled"}.`,
               },
             ],
-            details: { embedded, skipped, failed, model: config.embedding.modelName },
+            details: { embedded, skipped, failed, linked, model: config.embedding.modelName },
           };
         },
       },
@@ -753,6 +1074,116 @@ ${pct < 100 && config.embedding.provider === "local" ? "💡 Run memory_v2_embed
         },
       },
       { name: "memory_v2_stats" },
+    );
+
+    // ========================================================================
+    // Tool: memory_v2_migrate (v2 → v3 binary embeddings)
+    // ========================================================================
+    api.registerTool(
+      {
+        name: "memory_v2_migrate",
+        label: "Migrate to V3 (Binary Embeddings)",
+        description:
+          "Migrate memory index from v2 (JSON float arrays) to v3 (base64 binary embeddings). Reduces file size ~42%.",
+        parameters: Type.Object({}),
+        async execute() {
+          const index = loadIndex(indexPath);
+          let migrated = 0;
+          let alreadyBinary = 0;
+          const sizeBefore = fs.existsSync(indexPath) ? fs.statSync(indexPath).size : 0;
+
+          for (const memory of index.memories) {
+            if (memory.embedding && Array.isArray(memory.embedding)) {
+              memory.embedding = encodeEmbedding(memory.embedding);
+              migrated++;
+            } else if (memory.embedding && typeof memory.embedding === "string") {
+              alreadyBinary++;
+            }
+          }
+
+          index.version = "3.0";
+          saveIndex(indexPath, index);
+          const sizeAfter = fs.statSync(indexPath).size;
+          const reduction = sizeBefore > 0 ? Math.round((1 - sizeAfter / sizeBefore) * 100) : 0;
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Migration complete:\n- Converted: ${migrated} embeddings to base64\n- Already binary: ${alreadyBinary}\n- Size before: ${(sizeBefore / 1024).toFixed(1)}KB\n- Size after: ${(sizeAfter / 1024).toFixed(1)}KB\n- Reduction: ${reduction}%`,
+              },
+            ],
+            details: { migrated, alreadyBinary, sizeBefore, sizeAfter, reduction },
+          };
+        },
+      },
+      { name: "memory_v2_migrate" },
+    );
+
+    // ========================================================================
+    // Tool: memory_v2_link (create relations between memories)
+    // ========================================================================
+    api.registerTool(
+      {
+        name: "memory_v2_link",
+        label: "Link Memories",
+        description:
+          "Create a bidirectional relation between two memories. Types: caused, caused_by, related, supersedes, contradicts, elaborates.",
+        parameters: Type.Object({
+          sourceId: Type.String({ description: "Source memory ID" }),
+          targetId: Type.String({ description: "Target memory ID" }),
+          relationType: Type.String({
+            description: "Relation type",
+            enum: ["caused", "caused_by", "related", "supersedes", "contradicts", "elaborates"],
+          }),
+        }),
+        async execute(
+          _toolCallId: string,
+          params: { sourceId: string; targetId: string; relationType: string },
+        ) {
+          const index = loadIndex(indexPath);
+          const relType = params.relationType as MemoryRelationType;
+          const inverseType = INVERSE_RELATION[relType];
+
+          let sourceFound = false;
+          let targetFound = false;
+
+          for (let i = 0; i < index.memories.length; i++) {
+            if (index.memories[i].id === params.sourceId) {
+              index.memories[i] = addRelation(index.memories[i], params.targetId, relType);
+              sourceFound = true;
+            }
+            if (index.memories[i].id === params.targetId) {
+              index.memories[i] = addRelation(index.memories[i], params.sourceId, inverseType);
+              targetFound = true;
+            }
+          }
+
+          if (!sourceFound || !targetFound) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: ${!sourceFound ? `Source '${params.sourceId}' not found.` : ""} ${!targetFound ? `Target '${params.targetId}' not found.` : ""}`.trim(),
+                },
+              ],
+              details: { error: true },
+            };
+          }
+
+          saveIndex(indexPath, index);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Linked: ${params.sourceId} —[${relType}]→ ${params.targetId} (bidirectional: ${inverseType})`,
+              },
+            ],
+            details: { sourceId: params.sourceId, targetId: params.targetId, relType, inverseType },
+          };
+        },
+      },
+      { name: "memory_v2_link" },
     );
   },
 };
