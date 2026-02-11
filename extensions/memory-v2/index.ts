@@ -324,6 +324,12 @@ function autoLinkNewEntry(
     updated[idx] = addRelation(updated[idx], newEntry.id, "related");
   }
 
+  // Persist relation updates on the source entry too.
+  const sourceIdx = updated.findIndex((m) => m.id === newEntry.id);
+  if (sourceIdx >= 0) {
+    updated[sourceIdx] = newEntry;
+  }
+
   return updated;
 }
 
@@ -649,8 +655,9 @@ function searchMemories(
   maxResults: number,
   minScore: number,
   queryEmbedding?: number[] | null,
+  index?: V2MemoryIndex,
 ): Array<{ entry: V2MemoryEntry; score: number; keywordScore: number; semanticScore: number }> {
-  const index = loadIndex(indexPath);
+  const loadedIndex = index || loadIndex(indexPath);
   const queryTerms = query
     .toLowerCase()
     .split(/\s+/)
@@ -670,7 +677,7 @@ function searchMemories(
   // Convert query embedding to Float32Array once for efficient comparison
   const queryEmbF32 = queryEmbedding ? new Float32Array(queryEmbedding) : null;
 
-  for (const entry of index.memories) {
+  for (const entry of loadedIndex.memories) {
     const keywordScore = queryTerms.length > 0 ? scoreKeywordMatch(entry, queryTerms) : 0;
 
     let semanticScore = 0;
@@ -792,10 +799,18 @@ const memoryV2Plugin = {
             queryEmbedding = await embedder.embed(query);
           }
 
-          const results = searchMemories(indexPath, query, maxResults, minScore, queryEmbedding);
+          // Load index once so access tracking mutations persist on save.
+          const index = loadIndex(indexPath);
+          const results = searchMemories(
+            indexPath,
+            query,
+            maxResults,
+            minScore,
+            queryEmbedding,
+            index,
+          );
 
           // Graph-aware: enrich results with related memories
-          const index = loadIndex(indexPath);
           const graphResults = searchWithGraph(index.memories, results, 1);
           // Persist access tracking
           saveIndex(indexPath, index);
