@@ -339,11 +339,109 @@ function normalizeDate(value: string): string {
   return parsed.toISOString().slice(0, 10);
 }
 
-function ensureDate(entry: V2MemoryEntry): V2MemoryEntry {
-  if (!entry.date) {
-    return { ...entry, date: normalizeDate(entry.timestamp) };
-  }
-  return entry;
+const VALID_MEMORY_TYPES: MemoryType[] = [
+  "learning",
+  "decision",
+  "interaction",
+  "event",
+  "insight",
+];
+
+const VALID_RELATION_TYPES: MemoryRelationType[] = [
+  "caused",
+  "caused_by",
+  "related",
+  "supersedes",
+  "contradicts",
+  "elaborates",
+];
+
+function normalizeEntry(raw: unknown, fallbackLine: number = 1): V2MemoryEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const entry = raw as Record<string, unknown>;
+  const nowIso = new Date().toISOString();
+
+  const timestamp =
+    typeof entry.timestamp === "string" && !Number.isNaN(new Date(entry.timestamp).getTime())
+      ? entry.timestamp
+      : nowIso;
+
+  const date =
+    typeof entry.date === "string" && entry.date.trim().length > 0
+      ? entry.date
+      : normalizeDate(timestamp);
+
+  const type =
+    typeof entry.type === "string" && VALID_MEMORY_TYPES.includes(entry.type as MemoryType)
+      ? (entry.type as MemoryType)
+      : "event";
+
+  const importanceRaw = typeof entry.importance === "number" ? entry.importance : 5;
+  const importance = Math.max(1, Math.min(10, Math.round(importanceRaw)));
+
+  const content = typeof entry.content === "string" ? entry.content : "";
+
+  const file =
+    typeof entry.file === "string"
+      ? entry.file
+      : typeof entry.filePath === "string"
+        ? entry.filePath
+        : "";
+
+  const lineRaw = typeof entry.line === "number" ? entry.line : fallbackLine;
+  const line = Number.isFinite(lineRaw) && lineRaw > 0 ? Math.floor(lineRaw) : 1;
+
+  const tags = Array.isArray(entry.tags)
+    ? entry.tags.filter((t): t is string => typeof t === "string")
+    : [];
+
+  const relations: MemoryRelation[] | undefined = Array.isArray(entry.relations)
+    ? entry.relations
+        .filter((rel): rel is { id: unknown; type: unknown } => !!rel && typeof rel === "object")
+        .map((rel) => ({ id: String(rel.id ?? ""), type: String(rel.type ?? "") }))
+        .filter(
+          (rel): rel is MemoryRelation =>
+            rel.id.length > 0 && VALID_RELATION_TYPES.includes(rel.type as MemoryRelationType),
+        )
+    : undefined;
+
+  const embedding =
+    typeof entry.embedding === "string"
+      ? entry.embedding
+      : Array.isArray(entry.embedding)
+        ? entry.embedding.filter((v): v is number => typeof v === "number")
+        : undefined;
+
+  return {
+    id:
+      typeof entry.id === "string" && entry.id.trim().length > 0
+        ? entry.id
+        : `mem_${Date.now()}_${line}`,
+    timestamp,
+    date,
+    type,
+    importance,
+    content,
+    file,
+    line,
+    tags,
+    context: typeof entry.context === "string" ? entry.context : undefined,
+    filePath: typeof entry.filePath === "string" ? entry.filePath : undefined,
+    embedding,
+    relations,
+    accessCount:
+      typeof entry.accessCount === "number" && entry.accessCount >= 0
+        ? Math.floor(entry.accessCount)
+        : undefined,
+    lastAccessed: typeof entry.lastAccessed === "string" ? entry.lastAccessed : undefined,
+  };
+}
+
+function resolveMemoryPath(entry: V2MemoryEntry): string {
+  const file = typeof entry.file === "string" ? entry.file : "";
+  if (!file) return "";
+  return file.startsWith("daily/") ? `memory/${file}` : file;
 }
 
 function loadIndex(indexPath: string): V2MemoryIndex {
@@ -365,7 +463,8 @@ function loadIndex(indexPath: string): V2MemoryIndex {
     let foundMeta = false;
     const memories: V2MemoryEntry[] = [];
 
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       try {
         const parsed = JSON.parse(line) as Record<string, unknown>;
         if (parsed && parsed._meta === true) {
@@ -376,8 +475,12 @@ function loadIndex(indexPath: string): V2MemoryIndex {
           continue;
         }
 
-        const entry = parsed as V2MemoryEntry;
-        memories.push(ensureDate(entry));
+        const normalized = normalizeEntry(parsed, i + 1);
+        if (normalized) {
+          memories.push(normalized);
+        } else {
+          console.warn("memory-v2: skipped invalid memory entry", { line: i + 1 });
+        }
       } catch (err) {
         console.warn("memory-v2: skipped malformed JSONL line", err);
       }
@@ -386,11 +489,14 @@ function loadIndex(indexPath: string): V2MemoryIndex {
     if (!foundMeta && memories.length === 0 && content.includes('"memories"')) {
       try {
         const legacy = JSON.parse(content) as V2MemoryIndex;
+        const normalized = (legacy.memories || [])
+          .map((entry, idx) => normalizeEntry(entry, idx + 1))
+          .filter((entry): entry is V2MemoryEntry => !!entry);
         return {
           version: legacy.version || "2.0",
           lastUpdated: legacy.lastUpdated || new Date().toISOString(),
           embeddingModel: legacy.embeddingModel,
-          memories: (legacy.memories || []).map((entry) => ensureDate(entry)),
+          memories: normalized,
         };
       } catch (err) {
         console.warn("memory-v2: failed to parse legacy JSON index", err);
@@ -425,12 +531,13 @@ function saveIndex(indexPath: string, index: V2MemoryIndex): void {
   });
 
   const lines = [metaLine];
-  for (const memory of index.memories) {
-    const entry = ensureDate(memory);
+  for (let i = 0; i < index.memories.length; i++) {
+    const normalized = normalizeEntry(index.memories[i], i + 1);
+    if (!normalized) continue;
     const serialized =
-      entry.embedding && Array.isArray(entry.embedding)
-        ? { ...entry, embedding: encodeEmbedding(entry.embedding) }
-        : entry;
+      normalized.embedding && Array.isArray(normalized.embedding)
+        ? { ...normalized, embedding: encodeEmbedding(normalized.embedding) }
+        : normalized;
     lines.push(JSON.stringify(serialized));
   }
 
@@ -443,7 +550,11 @@ function appendEntry(indexPath: string, entry: V2MemoryEntry): void {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const normalized = ensureDate(entry);
+  const normalized = normalizeEntry(entry, 1);
+  if (!normalized) {
+    throw new Error("memory-v2: cannot append invalid memory entry");
+  }
+
   const serialized =
     normalized.embedding && Array.isArray(normalized.embedding)
       ? { ...normalized, embedding: encodeEmbedding(normalized.embedding) }
@@ -472,7 +583,9 @@ function migrateJsonToJsonl(jsonPath: string, jsonlPath: string): boolean {
   try {
     const raw = fs.readFileSync(jsonPath, "utf-8");
     const legacy = JSON.parse(raw) as V2MemoryIndex;
-    const memories = (legacy.memories || []).map((entry) => ensureDate(entry as V2MemoryEntry));
+    const memories = (legacy.memories || [])
+      .map((entry, idx) => normalizeEntry(entry as V2MemoryEntry, idx + 1))
+      .filter((entry): entry is V2MemoryEntry => !!entry);
 
     const migrated: V2MemoryIndex = {
       version: "2.1",
@@ -494,9 +607,9 @@ function migrateJsonToJsonl(jsonPath: string, jsonlPath: string): boolean {
 // ============================================================================
 
 function scoreKeywordMatch(entry: V2MemoryEntry, queryTerms: string[]): number {
-  const content = entry.content.toLowerCase();
-  const tags = entry.tags.map((t) => t.toLowerCase());
-  const type = entry.type.toLowerCase();
+  const content = (entry.content || "").toLowerCase();
+  const tags = (Array.isArray(entry.tags) ? entry.tags : []).map((t) => t.toLowerCase());
+  const type = (entry.type || "event").toLowerCase();
 
   let score = 0;
   let matchedTerms = 0;
@@ -690,8 +803,8 @@ const memoryV2Plugin = {
           const searchMode = queryEmbedding ? "hybrid" : "keyword";
           const formatted = graphResults.map(({ entry, score, related }) => ({
             id: entry.id,
-            path: entry.file.startsWith("daily/") ? `memory/${entry.file}` : entry.file,
-            line: entry.line,
+            path: resolveMemoryPath(entry),
+            line: entry.line || 1,
             score: Math.round(score * 100) / 100,
             type: entry.type,
             importance: entry.importance,
