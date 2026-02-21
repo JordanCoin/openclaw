@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:openclaw}/apps/macos",
+      "name": "Debug OpenClaw (apps/macos)",
+      "target": "OpenClaw",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug OpenClaw (apps/macos)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:openclaw}/apps/macos",
+      "name": "Release OpenClaw (apps/macos)",
+      "target": "OpenClaw",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release OpenClaw (apps/macos)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:openclaw}/apps/macos",
+      "name": "Debug openclaw-mac (apps/macos)",
+      "target": "openclaw-mac",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug openclaw-mac (apps/macos)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:openclaw}/apps/macos",
+      "name": "Release openclaw-mac (apps/macos)",
+      "target": "openclaw-mac",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release openclaw-mac (apps/macos)"
+    }
+  ]
+}

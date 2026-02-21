@@ -17,7 +17,7 @@ const DEFAULT_MODEL_ALIASES: Readonly<Record<string, string>> = {
   sonnet: "anthropic/claude-sonnet-4-6",
 
   // OpenAI
-  gpt: "openai/gpt-5.2",
+  gpt: "openai/gpt-5.3",
   "gpt-mini": "openai/gpt-5-mini",
 
   // Google Gemini (3.x are preview ids in the catalog)
@@ -25,6 +25,25 @@ const DEFAULT_MODEL_ALIASES: Readonly<Record<string, string>> = {
   "gemini-flash": "google/gemini-3-flash-preview",
 };
 
+/** Recommended fallback chain: Claude Opus → OpenAI Codex → OpenRouter auto → Gemini → local Qwen 7B. Use in config or onboarding. */
+export const DEFAULT_MODEL_PRIMARY = "anthropic/claude-opus-4-6";
+
+/** Ordered fallbacks when primary is unavailable (e.g. out of tokens). */
+export const DEFAULT_MODEL_FALLBACKS: readonly string[] = [
+  "openai-codex/gpt-5.3",
+  "openrouter/openrouter/auto",
+  "openrouter/google/gemini-2.5-flash",
+  "ollama/qwen2.5:7b",
+];
+
+/** Models allowlist (with aliases) for the recommended fallback chain. */
+export const DEFAULT_FALLBACK_CHAIN_MODELS: Readonly<Record<string, { alias: string }>> = {
+  [DEFAULT_MODEL_PRIMARY]: { alias: "Claude" },
+  "openai-codex/gpt-5.3": { alias: "Codex" },
+  "openrouter/openrouter/auto": { alias: "OpenRouter" },
+  "openrouter/google/gemini-2.5-flash": { alias: "Gemini" },
+  "ollama/qwen2.5:7b": { alias: "Qwen 7B" },
+};
 const DEFAULT_MODEL_COST: ModelDefinitionConfig["cost"] = {
   input: 0,
   output: 0,

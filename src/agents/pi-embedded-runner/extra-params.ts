@@ -300,6 +300,45 @@ type PayloadMessage = {
 };
 
 /**
+ * Recursively add additionalProperties: false to all objects in a JSON schema.
+ * Claude's API requires this for structured outputs.
+ */
+function enforceAdditionalPropertiesFalse(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...schema };
+
+  // If this is an object type, add additionalProperties: false
+  if (result.type === "object") {
+    result.additionalProperties = false;
+
+    // Recursively process properties
+    if (result.properties && typeof result.properties === "object") {
+      const props = result.properties as Record<string, Record<string, unknown>>;
+      result.properties = Object.fromEntries(
+        Object.entries(props).map(([key, value]) => [key, enforceAdditionalPropertiesFalse(value)]),
+      );
+    }
+  }
+
+  // Handle arrays - process items schema
+  if (result.type === "array" && result.items && typeof result.items === "object") {
+    result.items = enforceAdditionalPropertiesFalse(result.items as Record<string, unknown>);
+  }
+
+  // Handle anyOf, oneOf, allOf
+  for (const combinator of ["anyOf", "oneOf", "allOf"]) {
+    if (Array.isArray(result[combinator])) {
+      result[combinator] = (result[combinator] as Record<string, unknown>[]).map((s) =>
+        enforceAdditionalPropertiesFalse(s),
+      );
+    }
+  }
+
+  return result;
+}
+
+/**
  * Create a streamFn wrapper that injects Claude's native structured outputs.
  * Uses output_config.format to guarantee schema-compliant JSON responses.
  * Only applies to Anthropic provider.
@@ -309,6 +348,10 @@ function createStructuredOutputWrapper(
   responseSchema: Record<string, unknown>,
 ): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
+
+  // Claude requires additionalProperties: false on all objects
+  const normalizedSchema = enforceAdditionalPropertiesFalse(responseSchema);
+
   return (model, context, options) => {
     // Only apply to Anthropic provider
     if (model.provider !== "anthropic") {
@@ -328,7 +371,7 @@ function createStructuredOutputWrapper(
             ...p.output_config,
             format: {
               type: "json_schema",
-              schema: responseSchema,
+              schema: normalizedSchema,
             },
           };
           log.debug(`injecting structured output schema into Anthropic request`);
